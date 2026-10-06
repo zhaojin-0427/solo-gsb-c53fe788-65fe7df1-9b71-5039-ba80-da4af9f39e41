@@ -1,0 +1,10 @@
+services:
+  dmx-console:
+    build: .
+    container_name: dmx-address-console
+    ports:
+      - "8000:8000"
+    volumes:
+      # SQLite 数据库持久化到宿主机 ./data
+      - ./data:/data
+    restart: unless-stopped

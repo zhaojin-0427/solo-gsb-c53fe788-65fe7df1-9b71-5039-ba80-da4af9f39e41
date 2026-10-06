@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DMX 灯具地址编排台</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>🎛️ DMX 灯具地址编排台</h1>
+    <div class="topbar-right">
+      <span id="version-badge" class="badge">配置版本 -</span>
+      <span id="published-badge" class="badge badge-muted">未发布</span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="plan">编排</button>
+    <button class="tab" data-tab="fixtures">灯具实例</button>
+    <button class="tab" data-tab="catalog">灯具型录</button>
+    <button class="tab" data-tab="lines">线路与保留区</button>
+    <button class="tab" data-tab="published">已发布</button>
+  </nav>
+
+  <main>
+    <!-- 编排 -->
+    <section id="tab-plan" class="tab-panel active">
+      <div class="toolbar">
+        <button id="btn-preview" class="primary">生成预览</button>
+        <button id="btn-publish" class="success" disabled>按此预览原子发布</button>
+        <span id="plan-summary" class="muted"></span>
+      </div>
+      <div id="stale-banner" class="banner warn hidden"></div>
+      <div id="unproven-panel" class="banner warn hidden">
+        <h2>⏳ 未证最优（不可发布）</h2>
+        <p id="unproven-msg"></p>
+        <p id="unproven-detail" class="muted"></p>
+      </div>
+      <div id="conflict-panel" class="hidden">
+        <h2>⚠️ 无可行方案，冲突约束如下</h2>
+        <ul id="conflict-list"></ul>
+      </div>
+      <div id="occupancy-panel">
+        <h2>线路占用</h2>
+        <div id="tracks"></div>
+        <div class="legend">
+          <span><i class="swatch swatch-fixture"></i>灯具（原位）</span>
+          <span><i class="swatch swatch-migrated"></i>迁移灯具</span>
+          <span><i class="swatch swatch-locked"></i>锁定灯具</span>
+          <span><i class="swatch swatch-reserved"></i>保留区</span>
+        </div>
+      </div>
+      <div id="migration-panel" class="hidden">
+        <h2>迁移清单 <span id="migration-count" class="count"></span></h2>
+        <table class="data">
+          <thead><tr><th>灯具ID</th><th>名称</th><th>原线路</th><th>原地址</th><th></th><th>新线路</th><th>新地址</th><th>锁定</th></tr></thead>
+          <tbody id="migration-tbody"></tbody>
+        </table>
+      </div>
+      <div id="alloc-panel" class="hidden">
+        <h2>预览地址表</h2>
+        <table class="data">
+          <thead><tr><th>灯具ID</th><th>名称</th><th>线路</th><th>起始</th><th>结束</th><th>通道数</th><th>状态</th></tr></thead>
+          <tbody id="alloc-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 灯具实例 -->
+    <section id="tab-fixtures" class="tab-panel">
+      <h2>新建灯具实例</h2>
+      <form id="fixture-form" class="formgrid">
+        <label>名称<input name="name" required maxlength="128" placeholder="如 PAR-舞台左1" /></label>
+        <label>型号/模式
+          <select name="mode_id" id="fixture-mode-select" required></select>
+        </label>
+        <label>既有线路
+          <select name="previous_line"><option value="">（无，新灯具）</option><option>1</option><option>2</option><option>3</option><option>4</option></select>
+        </label>
+        <label>既有起始地址<input name="previous_start" type="number" min="1" max="512" placeholder="1-512" /></label>
+        <label class="check"><input type="checkbox" name="locked" /> 锁定到既有线路与地址</label>
+        <button class="primary" type="submit">添加灯具</button>
+      </form>
+      <h2>灯具列表 <span id="fixture-count" class="count"></span></h2>
+      <table class="data">
+        <thead><tr><th>ID</th><th>名称</th><th>型号</th><th>模式</th><th>通道</th><th>既有线路</th><th>既有地址</th><th>锁定</th><th>操作</th></tr></thead>
+        <tbody id="fixture-tbody"></tbody>
+      </table>
+    </section>
+
+    <!-- 型录 -->
+    <section id="tab-catalog" class="tab-panel">
+      <h2>导入灯具型录</h2>
+      <p class="muted">
+        CSV 列：<code>manufacturer,name,mode,channels</code>，同一型号多行表示多个模式；也支持 JSON 数组。
+        重复的型号/模式会更新通道数。
+      </p>
+      <div class="toolbar">
+        <input type="file" id="catalog-file" accept=".csv,.json,text/csv,application/json" />
+        <button id="btn-load-sample">载入示例 CSV</button>
+      </div>
+      <textarea id="catalog-text" class="csvbox" placeholder="manufacturer,name,mode,channels&#10;ACME,Solar 360,Basic,12&#10;..."></textarea>
+      <div class="toolbar"><button id="btn-import-text" class="primary">导入文本内容</button></div>
+      <div id="catalog-msg"></div>
+      <h2>已导入型号</h2>
+      <div id="catalog-list"></div>
+    </section>
+
+    <!-- 线路与保留区 -->
+    <section id="tab-lines" class="tab-panel">
+      <h2>DMX 线路（最多 4 条 × 512 通道）</h2>
+      <table class="data">
+        <thead><tr><th>线路</th><th>名称</th><th>启用</th><th></th></tr></thead>
+        <tbody id="line-tbody"></tbody>
+      </table>
+      <h2>保留区</h2>
+      <form id="reservation-form" class="formgrid">
+        <label>线路<select name="line_id" id="res-line"></select></label>
+        <label>起始地址<input name="start" type="number" min="1" max="512" required /></label>
+        <label>结束地址<input name="end" type="number" min="1" max="512" required /></label>
+        <label>说明<input name="reason" placeholder="如：调光台主控占用" /></label>
+        <button class="primary" type="submit">添加保留区</button>
+      </form>
+      <table class="data">
+        <thead><tr><th>ID</th><th>线路</th><th>起始</th><th>结束</th><th>通道数</th><th>说明</th><th>操作</th></tr></thead>
+        <tbody id="reservation-tbody"></tbody>
+      </table>
+    </section>
+
+    <!-- 已发布 -->
+    <section id="tab-published" class="tab-panel">
+      <div id="published-empty" class="muted">尚未发布任何配置。</div>
+      <div id="published-content" class="hidden">
+        <div class="toolbar">
+          <span id="published-meta"></span>
+          <a id="btn-download-csv" class="button-like" download>⬇ 下载已发布地址表 CSV</a>
+        </div>
+        <div id="published-notice" class="banner warn hidden"></div>
+        <h2>线路占用</h2>
+        <div id="published-tracks"></div>
+        <div class="legend">
+          <span><i class="swatch swatch-fixture"></i>灯具（原位）</span>
+          <span><i class="swatch swatch-migrated"></i>迁移灯具</span>
+          <span><i class="swatch swatch-locked"></i>锁定灯具</span>
+          <span><i class="swatch swatch-reserved"></i>保留区</span>
+        </div>
+        <div id="published-migration-panel" class="hidden">
+          <h2>迁移清单 <span id="published-migration-count" class="count"></span></h2>
+          <table class="data">
+            <thead><tr><th>灯具ID</th><th>名称</th><th>原线路</th><th>原地址</th><th></th><th>新线路</th><th>新地址</th><th>锁定</th></tr></thead>
+            <tbody id="published-migration-tbody"></tbody>
+          </table>
+        </div>
+        <h2>地址表</h2>
+        <table class="data">
+          <thead><tr><th>灯具ID</th><th>名称</th><th>线路</th><th>起始</th><th>结束</th><th>通道数</th><th>迁移</th><th>锁定</th></tr></thead>
+          <tbody id="published-tbody"></tbody>
+        </table>
+
+        <!-- 现场地址核验 -->
+        <h2>现场地址核验</h2>
+        <div id="verify-panel">
+          <p class="muted">
+            选择任一已发布方案，上传现场 CSV（需含表头：<code>灯具ID,线路,起始地址,通道数</code>；
+            兼容本系统导出的地址表 CSV，多余列自动忽略）。服务端以所选方案发布时的落点为基准，
+            按灯具 ID 对齐并计算闭区间；坏行、非法线路、越过 512 通道或重复 ID 的行会被隔离并逐项列出，
+            且只要存在异常行整表结论就不会是“一致”。核验为只读操作，不修改编排与发布数据。
+          </p>
+          <div class="toolbar">
+            <select id="verify-plan-select"></select>
+            <input type="file" id="verify-file" accept=".csv,text/csv" />
+            <button id="btn-verify" class="primary">上传并核验</button>
+          </div>
+          <div id="verify-result"></div>
+        </div>
+
+        <!-- DMX 信号回放 -->
+        <h2>DMX 信号回放</h2>
+        <div id="replay-panel">
+          <p class="muted">
+            选择一份已发布方案，上传信号 CSV（UTF-8，需含表头：<code>时间(毫秒),线路,通道,值</code>；
+            时间为非负毫秒、线路 1-4、通道 1-512、值 0-255），每行更新一个槽位。
+            服务端从所选版本的<strong>发布快照</strong>恢复灯具闭区间与保留区，按时间重建帧：
+            同一毫秒的多行合为一帧，槽位初值为 0，未更新的值延续上一帧。
+            页面按灯具展示相对通道读数及变化；有快照时逐帧列出保留区与未分配通道的非零值
+            （旧发布记录无快照时，灯具外非零值继续显示但归属未知，不会用当前保留区反推）。
+            同一毫秒同槽出现不同值时，可选择整表拒收或按文件顺序取末值（结果中逐项标注）。
+            回放为只读操作，不修改编排数据。
+          </p>
+          <div class="toolbar">
+            <select id="replay-plan-select"></select>
+            <input type="file" id="replay-file" accept=".csv,text/csv" />
+            <select id="replay-policy" title="同一毫秒、同一槽位出现不同值时的处理策略">
+              <option value="reject">同毫秒同槽不同值：整表拒收</option>
+              <option value="last">同毫秒同槽不同值：按文件顺序取末值</option>
+            </select>
+            <button id="btn-replay" class="primary">上传并回放</button>
+          </div>
+          <div id="replay-result"></div>
+        </div>
+
+        <!-- 双版本换场施工单 -->
+        <h2>双版本换场施工单</h2>
+        <div id="changeover-panel">
+          <p class="muted">
+            选择<strong>两份已发布方案</strong>（旧版起点 → 新版目标），服务端从各自的
+            <strong>发布快照</strong>还原灯具闭区间、保留区与线路启停，按灯具 ID 输出
+            拆除、迁址、通道数调整与接入的<strong>有序施工步骤</strong>：每步都经逐步模拟，
+            任何中间态灯具区间都不重叠、不压保留区，末态严格等于新版；灯具互相占位时，
+            会利用空闲连续区间<strong>临时周转</strong>（临时位避开新版所有落点），并列出每步释放/占用的区间。
+            两版保留区或线路启停不同、任一方案无快照或未发布时，不生成貌似安全的步骤并说明原因；
+            找不到安全周转位时列明阻塞区间。施工单为只读，不会修改任何编排、发布与配置数据。
+          </p>
+          <div class="toolbar">
+            <select id="changeover-from-select" title="旧版（起点）"></select>
+            <span>➡️</span>
+            <select id="changeover-to-select" title="新版（目标）"></select>
+            <button id="btn-changeover" class="primary">生成换场施工单</button>
+          </div>
+          <div id="changeover-result"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
