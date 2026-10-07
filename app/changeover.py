@@ -5,7 +5,11 @@
 发布会把落点回写为灯具“既有地址”，迁移清单是相对该既有地址的单版本结论，
 二者都不能冒充双版本换场的真实起点。
 
-按灯具 ID 对齐 A、B 两版后，灯具分四类：
+按灯具 ID 对齐 A、B 两版前，先核对稳定身份（identity_key）：数字 ID 在
+旧库中可能因删灯重建而复用，“同 ID”不等于“同一台灯”。两版共同 ID 必须
+携带一致的身份记录才允许比较；任一版是升级前无身份记录的旧快照时，共同
+ID 的换场直接拒绝（不按名称猜身份），仅一侧出现的 ID（拆除/接入）无歧义。
+身份成立后，灯具分四类：
 - 拆除（remove）：仅 A 中有；
 - 接入（install）：仅 B 中有；
 - 通道数调整（resize）：两版线路与起始地址相同、通道数不同（同址增减通道）；
@@ -52,13 +56,19 @@ class Ival:
 
 @dataclass
 class Fx:
-    """一台灯具在某一版快照中的落点与名称（名称仅用于展示）。"""
+    """一台灯具在某一版快照中的落点与名称（名称仅用于展示）。
+
+    identity_key 是灯具的稳定身份（随升级后的发布快照持久化）；旧快照
+    没有身份记录时为 None。跨版本对齐只认身份，不看名称，也不把可复用的
+    数字 ID 当成身份。
+    """
 
     fid: int
     name: str
     line: int
     start: int
     end: int
+    identity_key: str | None = None
 
     @property
     def channels(self) -> int:
@@ -114,11 +124,20 @@ def _extract_snapshot(payload: dict, label: str) -> tuple[dict[int, Fx], dict[in
             line=a["line_id"],
             start=a["start"],
             end=a["end"],
+            identity_key=a.get("identity_key"),
         )
         if fx.fid in fixtures:
             raise ChangeoverError(
                 "snapshot_inconsistent",
                 f"方案 #{plan_id}（{label}）快照中灯具 ID {fx.fid} 重复出现，快照数据不一致。",
+            )
+        if fx.identity_key is not None and any(
+            other.identity_key == fx.identity_key for other in fixtures.values()
+        ):
+            raise ChangeoverError(
+                "snapshot_inconsistent",
+                f"方案 #{plan_id}（{label}）快照中同一稳定身份 {fx.identity_key} 绑定了多个灯具 ID，"
+                "快照数据不一致。",
             )
         if fx.line not in VALID_LINE_IDS or not (1 <= fx.start <= fx.end <= LINE_SIZE):
             raise ChangeoverError(
@@ -540,6 +559,79 @@ class _Planner:
 
 
 # ---------------------------------------------------------------------------
+# 身份对齐：数字 ID 可复用，跨版本只认稳定身份（identity_key）
+# ---------------------------------------------------------------------------
+def _check_identity(
+    a_fx: dict[int, Fx],
+    b_fx: dict[int, Fx],
+    plan_a,
+    plan_b,
+) -> None:
+    """核对两版快照中“同一台灯”的身份依据。
+
+    背景：SQLite 整数主键在删除末位灯具后可能把同一数字 ID 发给新灯，
+    因此“两版同 ID”并不等于“同一台灯”。升级后的发布快照逐台携带
+    identity_key（创建即固定的稳定身份，改名/换模式都不变），跨版本
+    对齐只认身份：
+
+    - 两版同 ID 且身份一致 -> 同一台灯，允许按 ID 比较；
+    - 同 ID 但身份不同（key 冲突）-> 是两台灯，按数字 ID 对齐必然误判，
+      数据矛盾，拒绝；
+    - 同 ID 但任一侧缺少可核实身份（升级前旧快照、无快照重建记录）->
+      无法证明是不是同一台灯，**绝不按名称猜测**，拒绝自动施工单，
+      逐项列出拿不准的 ID 及原因。仅在一侧出现的 ID 无歧义（拆除/接入），
+      不需要身份依据，故“无共同 ID”的纯拆除/接入型历史换场不受影响。
+    """
+    conflicts: list[dict] = []
+    unverifiable: list[dict] = []
+    for fid in sorted(set(a_fx) & set(b_fx)):
+        ka, kb = a_fx[fid].identity_key, b_fx[fid].identity_key
+        if ka is None or kb is None:
+            unverifiable.append(
+                {
+                    "fixture_id": fid,
+                    "name_a": a_fx[fid].name,
+                    "name_b": b_fx[fid].name,
+                    "identity_from_a": ka,
+                    "identity_from_b": kb,
+                    "reason": (
+                        "该灯具 ID 在旧版（升级前写入、无身份记录的发布快照）中出现，"
+                        "无法核实两版同 ID 是否为同一台灯（旧库期间该数字 ID 可能已被"
+                        "删除并重新分配给新灯）；名称不作为身份依据"
+                    ),
+                }
+            )
+        elif ka != kb:
+            conflicts.append(
+                {
+                    "fixture_id": fid,
+                    "name_a": a_fx[fid].name,
+                    "name_b": b_fx[fid].name,
+                    "identity_from_a": ka,
+                    "identity_from_b": kb,
+                    "reason": "同一数字 ID 在两版快照中的稳定身份不同：是两台不同的灯，按 ID 对齐会把拆除+接入误判为迁址",
+                }
+            )
+
+    if conflicts:
+        raise ChangeoverError(
+            "identity_conflict",
+            "两版快照存在数字 ID 相同但身份不同的灯具：按 ID 对齐会把“拆除旧灯、接入新灯”"
+            "误判为同一台灯迁址，不能生成施工单。",
+            [{"type": "identity_conflict", "fixtures": conflicts}],
+        )
+    if unverifiable:
+        raise ChangeoverError(
+            "identity_unverifiable",
+            "两版快照包含相同灯具 ID，但其中至少一版是升级前写入、没有稳定身份记录的旧快照："
+            "无法核实该 ID 在两版中是否指同一台灯（旧库的整数 ID 在删灯重建后可能复用，"
+            "名称不能作为身份依据）。为避免把拆除+接入误判成迁址/通道调整，不自动生成施工单。"
+            "请人工核对下列灯具在两版之间是否为同一物理灯具。",
+            [{"type": "identity_unverifiable", "fixtures": unverifiable}],
+        )
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 def build_changeover(payload_a: dict, payload_b: dict) -> dict:
@@ -553,6 +645,10 @@ def build_changeover(payload_a: dict, payload_b: dict) -> dict:
     b_fx, b_res, b_active = _extract_snapshot(payload_b, "新版（目标）")
 
     plan_a, plan_b = payload_a["plan_id"], payload_b["plan_id"]
+
+    # 身份对齐必须先于一切比较：数字 ID 可复用，旧快照缺身份记录时
+    # 共同 ID 的换场直接拒绝，避免拆除/接入被误判为迁址/通道调整
+    _check_identity(a_fx, b_fx, plan_a, plan_b)
 
     # 线路启停两版必须一致：中间态只有一套总线可用，无法同时尊重两种启停
     line_diffs = [
@@ -587,6 +683,8 @@ def build_changeover(payload_a: dict, payload_b: dict) -> dict:
             "from_config_version": payload_a.get("config_version"),
             "to_config_version": payload_b.get("config_version"),
             "from_snapshot": True,
+            # 共同灯具均已通过稳定身份核对（改名/换模式不影响）
+            "identity_basis": "identity_key",
         }
 
     try:

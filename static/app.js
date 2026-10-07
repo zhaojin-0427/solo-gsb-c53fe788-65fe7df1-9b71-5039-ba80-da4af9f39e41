@@ -1266,10 +1266,28 @@ function renderChangeoverRejection(err) {
       snapshot_inconsistent: "快照数据不一致",
       lines_mismatch: "线路启停两版不一致",
       reservations_mismatch: "保留区两版不一致",
+      identity_conflict: "两版存在 ID 相同但身份不同的灯具",
+      identity_unverifiable: "旧快照缺少可核实的灯具身份记录",
       simulation_failed: "施工模拟自检失败",
     };
     for (const reason of detail.reasons || []) {
-      if (reason.type === "line_active_mismatch") {
+      if (reason.type === "identity_unverifiable" || reason.type === "identity_conflict") {
+        const warn =
+          reason.type === "identity_unverifiable"
+            ? "下列灯具 ID 在两版中都出现，但至少一版是升级前写入、没有稳定身份记录的旧快照，"
+              + "无法核实是否为同一物理灯具（旧库删灯重建后整数 ID 可能复用）。系统不会按名称猜测身份，"
+              + "请人工核对后再施工——它们应是“拆除旧灯 + 接入新灯”，而不是迁址或通道调整："
+            : "下列灯具 ID 在两版中的稳定身份不同，是两台不同的灯，按 ID 对齐会把拆除+接入误判为迁址：";
+        html += `<p class="muted">${warn}</p>
+          <table class="data"><thead><tr><th>灯具 ID</th><th>旧版名称（仅展示）</th><th>新版名称（仅展示）</th></tr></thead>
+          <tbody>${(reason.fixtures || [])
+            .map(
+              (f) => `<tr><td>#${f.fixture_id}</td>
+                <td>${esc(f.name_a ?? "")}</td>
+                <td class="diff-bad">${esc(f.name_b ?? "")}</td></tr>`
+            )
+            .join("")}</tbody></table>`;
+      } else if (reason.type === "line_active_mismatch") {
         html += `
           <h3>线路启停差异</h3>
           <table class="data"><thead><tr><th>线路</th><th>旧版</th><th>新版</th></tr></thead>

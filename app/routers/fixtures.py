@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import schemas
+from .. import identity, schemas
 from ..database import get_db
 from ..models import Fixture, FixtureMode, FixtureType
 from ..services import bump_config_version
@@ -48,7 +48,12 @@ def create_fixture(body: schemas.FixtureIn, db: Session = Depends(get_db)):
                 status_code=422,
                 detail=f"该模式占 {mode.channels} 通道，起始地址不能超过 {max_start}",
             )
+    # 持久分配数字 ID 与稳定身份：ID 单调不复用（删灯后新建也拿新 ID），
+    # 身份写入台账并随灯具/发布快照留存——与配置版本推进在同一事务提交。
+    fixture_id, identity_key = identity.allocate_fixture(db)
     fx = Fixture(
+        id=fixture_id,
+        identity_key=identity_key,
         name=body.name,
         mode_id=body.mode_id,
         previous_line=body.previous_line,
@@ -56,10 +61,9 @@ def create_fixture(body: schemas.FixtureIn, db: Session = Depends(get_db)):
         locked=body.locked,
     )
     db.add(fx)
-    db.commit()
-    db.refresh(fx)
     bump_config_version(db)
     db.commit()
+    db.refresh(fx)
     return _out(db, fx)
 
 
@@ -111,5 +115,7 @@ def update_fixture(fixture_id: int, body: schemas.FixtureUpdate, db: Session = D
 def delete_fixture(fixture_id: int, db: Session = Depends(get_db)):
     fx = _get_fixture(db, fixture_id)
     db.delete(fx)
+    # 台账保留该 ID 与身份（retired）：发布快照引用过它，且该 ID 永不再发给新灯
+    identity.retire_fixture(db, fixture_id)
     bump_config_version(db)
     db.commit()

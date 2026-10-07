@@ -30,9 +30,19 @@ def client():
 # ---------------------------------------------------------------------------
 # 快照 payload 构造（引擎层只依赖 payload，不碰数据库）
 # ---------------------------------------------------------------------------
-def make_payload(plan_id, cv, allocs, reservations=None, active_lines=(1, 2, 3, 4)):
-    """allocs: [(fid, name, line, start, end)]；reservations: {line: [(start,end), ...]}。"""
+def make_payload(plan_id, cv, allocs, reservations=None, active_lines=(1, 2, 3, 4), identities=None):
+    """allocs: [(fid, name, line, start, end)]；reservations: {line: [(start,end), ...]}。
+
+    identities 可控制每台灯的稳定身份：默认按 fid 给确定身份（同一 fid 跨版
+    身份一致，模拟升级后的真实快照）；传 {fid: None} 模拟升级前无身份记录的
+    旧快照，传 {fid: "other"} 模拟 ID 复用导致的身份冲突。
+    """
     reservations = reservations or {}
+    identities = identities or {}
+
+    def _key(fid):
+        return identities.get(fid, f"key-{fid:08d}")
+
     res_by_line = {l: [] for l in range(1, 5)}
     for line, items in reservations.items():
         for k, (s, e) in enumerate(items):
@@ -40,7 +50,7 @@ def make_payload(plan_id, cv, allocs, reservations=None, active_lines=(1, 2, 3, 
     fx_by_line = {l: [] for l in range(1, 5)}
     for fid, name, line, s, e in allocs:
         fx_by_line[line].append(
-            {"fixture_id": fid, "name": name, "start": s, "end": e,
+            {"fixture_id": fid, "identity_key": _key(fid), "name": name, "start": s, "end": e,
              "channels": e - s + 1, "migrated": False, "locked": False}
         )
     occupancy = []
@@ -61,8 +71,9 @@ def make_payload(plan_id, cv, allocs, reservations=None, active_lines=(1, 2, 3, 
     return {
         "plan_id": plan_id, "config_version": cv, "status": "published",
         "optimality_status": "optimal", "from_snapshot": True,
+        "identity_mode": "identity_key",
         "allocations": [
-            {"fixture_id": f, "name": n, "line_id": l, "start": s, "end": e,
+            {"fixture_id": f, "identity_key": _key(f), "name": n, "line_id": l, "start": s, "end": e,
              "channels": e - s + 1, "migrated": False, "locked": False}
             for f, n, l, s, e in allocs
         ],

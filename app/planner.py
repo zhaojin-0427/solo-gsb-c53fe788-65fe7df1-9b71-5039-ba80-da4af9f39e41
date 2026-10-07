@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from . import solver
+from . import identity, solver
 from .models import (
     Fixture,
     FixtureMode,
@@ -103,12 +103,14 @@ def _unproven_payload(db: Session, result: solver.SolveResult, version: int) -> 
     仍为 HTTP 200 并携带 unproven 状态与阶段信息，不当作已证无解。
     """
     has_candidate = result.feasible
-    names = {f.id: f.name for f in db.query(Fixture).all()}
+    idmap = identity.get_identity_map(db)
+    names = {fid: name for fid, name in db.query(Fixture.id, Fixture.name).all()}
     locked_ids = {f.id for f in db.query(Fixture).filter(Fixture.locked.is_(True)).all()}
     prev = {f.id: (f.previous_line, f.previous_start, f.locked) for f in db.query(Fixture).all()}
     alloc_out = [
         {
             "fixture_id": a.fixture_id,
+            "identity_key": idmap.get(a.fixture_id),
             "name": names.get(a.fixture_id, f"#{a.fixture_id}"),
             "line_id": a.line_id,
             "start": a.start,
@@ -156,11 +158,14 @@ def _plan_payload(db: Session, plan: Plan, *, feasible: bool = True) -> dict:
         .order_by(PlanAllocation.fixture_id)
         .all()
     )
-    names = {f.id: f.name for f in db.query(Fixture).all()}
+    idmap = identity.get_identity_map(db)
+    names = {fid: name for fid, name in db.query(Fixture.id, Fixture.name).all()}
     locked_ids = {f.id for f in db.query(Fixture).filter(Fixture.locked.is_(True)).all()}
     alloc_out = [
         {
             "fixture_id": a.fixture_id,
+            # 稳定身份随快照持久化：跨版本换场只认身份，名称/数字 ID 都不参与身份判断
+            "identity_key": idmap.get(a.fixture_id),
             "name": names.get(a.fixture_id, f"#{a.fixture_id}"),
             "line_id": a.line_id,
             "start": a.start,
@@ -184,9 +189,11 @@ def _plan_payload(db: Session, plan: Plan, *, feasible: bool = True) -> dict:
         "published_at": plan.published_at,
         # 本函数始终按当前灯具/线路/保留区实时重建，不是发布快照
         "from_snapshot": False,
+        # 升级后的每台灯都带可核实身份；无该标记的历史快照视为无身份依据
+        "identity_mode": "identity_key",
         "allocations": alloc_out,
         "migrations": _migrations_from_alloc(db, alloc_out),
-        "occupancy": _occupancy_for(db, allocs),
+        "occupancy": _occupancy_for(db, allocs, idmap=idmap, names=names, locked_ids=locked_ids),
         "conflicts": [],
     }
 
@@ -212,16 +219,28 @@ def _migrations_from_alloc(db: Session, alloc_out: list[dict]) -> list[dict]:
     return items
 
 
-def _occupancy_for(db: Session, allocs: list[PlanAllocation]) -> list[dict]:
+def _occupancy_for(
+    db: Session,
+    allocs: list[PlanAllocation],
+    *,
+    idmap: dict | None = None,
+    names: dict | None = None,
+    locked_ids: set[int] | None = None,
+) -> list[dict]:
     lines = db.query(Line).order_by(Line.id).all()
     reservations = db.query(Reservation).all()
-    names = {f.id: f.name for f in db.query(Fixture).all()}
-    locked_ids = {f.id for f in db.query(Fixture).filter(Fixture.locked.is_(True)).all()}
+    if idmap is None:
+        idmap = identity.get_identity_map(db)
+    if names is None:
+        names = {fid: name for fid, name in db.query(Fixture.id, Fixture.name).all()}
+    if locked_ids is None:
+        locked_ids = {f.id for f in db.query(Fixture).filter(Fixture.locked.is_(True)).all()}
     blocks: dict[int, list[dict]] = {l.id: [] for l in lines}
     for a in allocs:
         blocks[a.line_id].append(
             {
                 "fixture_id": a.fixture_id,
+                "identity_key": idmap.get(a.fixture_id),
                 "name": names.get(a.fixture_id, f"#{a.fixture_id}"),
                 "start": a.start,
                 "end": a.end,
@@ -306,6 +325,10 @@ def _legacy_published_payload(db: Session, plan: Plan) -> dict:
         alloc_out.append(
             {
                 "fixture_id": a.fixture_id,
+                # 无快照旧记录没有任何可核实身份依据：identity_key 为 None，
+                # 换场对齐时共同 ID 一律拒绝，不按名称猜测
+                "identity_key": None,
+                "identity_source": "unknown",
                 "name": name,
                 "name_source": name_source,
                 "line_id": a.line_id,
@@ -367,6 +390,7 @@ def _legacy_occupancy(db: Session, alloc_out: list[dict]) -> list[dict]:
         blocks[a["line_id"]].append(
             {
                 "fixture_id": a["fixture_id"],
+                "identity_key": None,
                 "name": a["name"],
                 "name_source": a["name_source"],
                 "start": a["start"],
@@ -437,6 +461,9 @@ def _payload_from_snapshot(db: Session, plan: Plan) -> dict | None:
         "created_at": plan.created_at,
         "published_at": plan.published_at,
         "from_snapshot": True,
+        # 升级后写入的快照携带 identity_key 身份；更早的快照无此字段，
+        # identity_mode 缺省，changeover 据此把共同 ID 判为身份不可核实
+        "identity_mode": stored.get("identity_mode"),
         "allocations": stored.get("allocations", []),
         "migrations": stored.get("migrations", []),
         "occupancy": stored.get("occupancy", []),
@@ -520,6 +547,8 @@ def publish_plan(db: Session, plan_id: int) -> dict:
         if fx is not None:
             fx.previous_line = a["line_id"]
             fx.previous_start = a["start"]
+    # 快照引用过的 ID 在台账留痕（含已删除灯具的台账行）：永不复用，重启后仍有效
+    identity.mark_published(db, (a["fixture_id"] for a in payload["allocations"]))
     # 发布改变了灯具的“既有地址”，配置版本再推进一步，使旧草稿全部失效
     new_version = bump_config_version(db)
     db.commit()

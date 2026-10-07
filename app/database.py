@@ -36,5 +36,10 @@ def get_db() -> Iterator[Session]:
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        # 请求处理失败时回滚未提交事务：灯具 ID 计数器等写入不能因为
+        # 名称冲突等校验失败而留在事务里被后续操作意外带出
+        db.rollback()
+        raise
     finally:
         db.close()

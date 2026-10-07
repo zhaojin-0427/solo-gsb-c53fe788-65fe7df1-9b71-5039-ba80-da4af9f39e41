@@ -57,11 +57,18 @@ class FixtureMode(Base):
 
 
 class Fixture(Base):
-    """灯具实例，引用一个具体模式，可记录上一版地址、可锁定。"""
+    """灯具实例，引用一个具体模式，可记录上一版地址、可锁定。
+
+    identity_key 是灯具的稳定身份：创建时分配、永不变更，随发布快照持久化。
+    改名、换模式、锁定切换都不改变身份；删除后身份进入台账（retired），
+    数字 ID 永不再发给新灯——因此跨快照对齐靠身份而不是名称或可复用的整数 ID。
+    升级前的旧灯具在迁移时补齐身份；旧快照里没有身份记录。
+    """
 
     __tablename__ = "fixtures"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    identity_key: Mapped[str | None] = mapped_column(String(32), nullable=True, unique=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     mode_id: Mapped[int] = mapped_column(
         ForeignKey("fixture_modes.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -71,6 +78,42 @@ class Fixture(Base):
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     mode: Mapped[FixtureMode] = relationship()
+
+
+class FixtureIdLedger(Base):
+    """灯具数字 ID 台账：每个分配过或被发布明细引用过的 ID 占一行，永不删除。
+
+    作用：持久保证数字 ID 不复用——
+    - 发布快照引用过的 ID 留痕（ever_published=True），即使灯具后来删除；
+    - 升级后删除的灯具保留为 retired，ID 不再发给新灯；
+    - identity_key 是该 ID 对应灯具的稳定身份（删除后仍随台账保留），
+      供发布快照跨版本核对“同一台灯”，改名/换模式不影响。
+    升级前仅在方案明细中出现、灯具已不在表中的 ID 也补进台账（retired，
+    无 identity_key），仅用于占位防复用，不构成跨快照身份依据。
+    """
+
+    __tablename__ = "fixture_id_ledger"
+
+    fixture_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    identity_key: Mapped[str | None] = mapped_column(String(32), nullable=True, unique=True)
+    # active：当前存在的灯具；retired：已删除（升级后删除）或升级时仅见于历史明细
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="retired")
+    ever_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
+
+
+class FixtureIdSeq(Base):
+    """灯具数字 ID 的持久单调计数器（单行，id=1）。
+
+    重启后仍有效：新灯具 ID 恒为“当前值之后的下一个整数”，只增不减；
+    台账中历史引用（含升级时从方案明细补录的最大 ID）会在迁移时把计数器
+    推过它们，因此 SQLite 对已删除最大主键的复用被从应用层彻底消除。
+    """
+
+    __tablename__ = "fixture_id_seq"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    next_id: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
 class Line(Base):
