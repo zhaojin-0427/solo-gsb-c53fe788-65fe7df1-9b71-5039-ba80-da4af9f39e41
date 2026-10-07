@@ -198,6 +198,7 @@ async function loadFixtures() {
     <tr>
       <td>${f.id}</td>
       <td>${esc(f.name)}</td>
+      <td class="muted" title="${esc(f.identity || "")}">${f.identity ? esc(f.identity.slice(0, 8)) : "—"}</td>
       <td>${esc(f.type_name || "-")}</td>
       <td>${esc(f.mode_name || "-")}</td>
       <td>${f.channels}</td>
@@ -1222,7 +1223,7 @@ function renderChangeover(r) {
   const steps = r.steps || [];
   let html = `
     <div class="banner ok">
-      换场施工单（发布 #${r.from_plan_id} ➡️ 发布 #${r.to_id}）：共 <strong>${c.total_steps}</strong> 步，
+      换场施工单（发布 #${r.from_plan_id} ➡️ 发布 #${r.to_plan_id}）：共 <strong>${c.total_steps}</strong> 步，
       其中临时周转 <strong>${c.temporary_steps}</strong> 步。
       拆除 ${c.remove} 台 · 迁址 ${c.relocate} 台 · 通道数调整 ${c.channel_adjust} 台
       （缩短 ${c.channel_adjust_shrink} / 加长 ${c.channel_adjust_grow}）· 接入 ${c.install} 台。
@@ -1266,10 +1267,29 @@ function renderChangeoverRejection(err) {
       snapshot_inconsistent: "快照数据不一致",
       lines_mismatch: "线路启停两版不一致",
       reservations_mismatch: "保留区两版不一致",
+      identity_uncertain: "灯具身份无法核实",
       simulation_failed: "施工模拟自检失败",
     };
     for (const reason of detail.reasons || []) {
-      if (reason.type === "line_active_mismatch") {
+      if (reason.type === "identity_uncertain") {
+        html += `
+          <h3>无法核实身份的灯具（请现场核对）</h3>
+          <p class="muted">这些 ID 在两版中落点不同，但至少一版快照缺少身份记录，
+          无法排除“删除旧灯后以同一 ID 重建新灯”——若实为两台灯，应按拆除 + 接入施工。</p>
+          <table class="data"><thead><tr><th>灯具ID</th><th>旧版落点</th><th>新版落点</th><th>身份记录</th></tr></thead>
+          <tbody>${(reason.fixtures || [])
+            .map(
+              (f) => `<tr>
+                <td>#${f.fixture_id}</td>
+                <td>线路 ${f.from_a.line_id} · ${f.from_a.start}-${f.from_a.end}</td>
+                <td>线路 ${f.to_b.line_id} · ${f.to_b.start}-${f.to_b.end}</td>
+                <td class="diff-bad">${[f.identity_in_a ? null : "旧版缺失", f.identity_in_b ? null : "新版缺失"]
+                  .filter(Boolean)
+                  .join("；")}</td>
+              </tr>`
+            )
+            .join("")}</tbody></table>`;
+      } else if (reason.type === "line_active_mismatch") {
         html += `
           <h3>线路启停差异</h3>
           <table class="data"><thead><tr><th>线路</th><th>旧版</th><th>新版</th></tr></thead>

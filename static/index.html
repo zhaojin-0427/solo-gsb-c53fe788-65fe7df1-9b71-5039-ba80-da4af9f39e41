@@ -83,8 +83,10 @@
         <button class="primary" type="submit">添加灯具</button>
       </form>
       <h2>灯具列表 <span id="fixture-count" class="count"></span></h2>
+      <p class="muted">灯具 ID 单调分配、删除后不复用；“身份标识”在创建时生成，改名/换模式不变，
+        换场施工单据此核实同一 ID 是否同一台灯。</p>
       <table class="data">
-        <thead><tr><th>ID</th><th>名称</th><th>型号</th><th>模式</th><th>通道</th><th>既有线路</th><th>既有地址</th><th>锁定</th><th>操作</th></tr></thead>
+        <thead><tr><th>ID</th><th>名称</th><th>身份标识</th><th>型号</th><th>模式</th><th>通道</th><th>既有线路</th><th>既有地址</th><th>锁定</th><th>操作</th></tr></thead>
         <tbody id="fixture-tbody"></tbody>
       </table>
     </section>

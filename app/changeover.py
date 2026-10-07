@@ -7,9 +7,18 @@
 
 按灯具 ID 对齐 A、B 两版后，灯具分四类：
 - 拆除（remove）：仅 A 中有；
-- 接入（install）：仅 B 中有；
+- 接入（install）：仅 B 中有（同一 ID 即便落在旧灯具腾出的位置，只要身份记录
+  相同就仍算同一台灯，不会误拆误接）；
 - 通道数调整（resize）：两版线路与起始地址相同、通道数不同（同址增减通道）；
 - 迁址（relocate）：线路或起始地址不同（通道数可同时变化）。
+
+同一数字 ID 的身份核对（防止删除重建复用 ID 造成误判）：
+- 两版快照都带身份记录且相同：同一台灯，正常分类（改名/换模式不影响）；
+- 两版身份记录不同：旧灯已删除、ID 被新灯复用——拆成“拆除 + 接入”两台灯；
+- 任一侧快照缺身份记录（升级前发布的旧快照）且该 ID 落点有变化：无法核实
+  是否同一台，拒绝自动生成施工单并逐项说明（identity_uncertain）；
+- 缺身份记录但落点完全一致：无需任何施工动作，歧义无实际影响，正常输出。
+身份核对只认发布快照中的身份记录，绝不按名称猜测。
 
 规划分阶段进行，每一步都在模拟现场上真实执行并校验：
 1. 拆除；2. 缩短式通道调整（先释放尾部空间）；3. 迁址（含周转）；
@@ -52,13 +61,18 @@ class Ival:
 
 @dataclass
 class Fx:
-    """一台灯具在某一版快照中的落点与名称（名称仅用于展示）。"""
+    """一台灯具在某一版快照中的落点与名称（名称仅用于展示）。
+
+    identity 是发布时随快照写入的可靠身份记录（灯具创建时生成的 UUID，
+    改名/换模式不变）；升级前发布的旧快照没有该字段，为 None。
+    """
 
     fid: int
     name: str
     line: int
     start: int
     end: int
+    identity: str | None = None
 
     @property
     def channels(self) -> int:
@@ -114,6 +128,9 @@ def _extract_snapshot(payload: dict, label: str) -> tuple[dict[int, Fx], dict[in
             line=a["line_id"],
             start=a["start"],
             end=a["end"],
+            # 升级前发布的旧快照没有身份记录：保持 None，由身份核对环节
+            # 决定能否安全按 ID 对齐，绝不在此用名称猜测身份
+            identity=a.get("identity"),
         )
         if fx.fid in fixtures:
             raise ChangeoverError(
@@ -257,11 +274,38 @@ class _Planner:
         self.installed_ids = sorted(ids_b - ids_a)
         common = sorted(ids_a & ids_b)
 
+        # 身份核对：同一数字 ID 在两版中是否同一台灯。
+        # recreated_ids：双方身份记录都在且不同——旧灯已删除、ID 被新灯复用，
+        # 必须拆成“拆除旧灯 + 接入新灯”，绝不能当作同一台灯迁址/调通道；
+        # uncertain：任一侧快照缺身份记录（升级前发布）且落点有变化，
+        # 无法核实是否同一台，由入口拒绝自动生成施工单。
+        self.recreated_ids: set[int] = set()
+        self.uncertain: list[dict] = []
+
         self.shrink_ids: list[int] = []  # 同址缩短
         self.grow_ids: list[int] = []  # 同址加长
         self.relocate_ids: list[int] = []  # 迁址（通道数可同时变化）
         for fid in common:
             x, y = a_fx[fid], b_fx[fid]
+            if x.identity is not None and y.identity is not None:
+                if x.identity != y.identity:
+                    self.recreated_ids.add(fid)
+                    self.removed_ids.append(fid)
+                    self.installed_ids.append(fid)
+                    continue
+            elif (x.line, x.start, x.end) != (y.line, y.start, y.end):
+                self.uncertain.append(
+                    {
+                        "fixture_id": fid,
+                        "from_a": {"line_id": x.line, "start": x.start, "end": x.end},
+                        "to_b": {"line_id": y.line, "start": y.start, "end": y.end},
+                        "identity_in_a": x.identity is not None,
+                        "identity_in_b": y.identity is not None,
+                    }
+                )
+                continue
+            # 缺身份记录但落点完全一致：无论是否同一台，现场都不需要任何
+            # 施工动作，歧义没有实际影响，按同一台灯处理（不产生步骤）
             if (x.line, x.start) == (y.line, y.start):
                 if x.channels < y.channels:
                     self.grow_ids.append(fid)
@@ -269,6 +313,8 @@ class _Planner:
                     self.shrink_ids.append(fid)
             else:
                 self.relocate_ids.append(fid)
+        self.removed_ids.sort()
+        self.installed_ids.sort()
         self.remaining_relocators = set(self.relocate_ids)
         self.remaining_grows = set(self.grow_ids)
         self.remaining_installs = set(self.installed_ids)
@@ -285,6 +331,7 @@ class _Planner:
         note: str = "",
         channels_before: int | None = None,
         channels_after: int | None = None,
+        name: str | None = None,
     ) -> dict:
         self.seq += 1
         step = {
@@ -292,7 +339,9 @@ class _Planner:
             "action": action,
             "temporary": temporary,
             "fixture_id": fid,
-            "fixture_name": self.b_fx.get(fid, self.a_fx.get(fid)).name,
+            # 名称仅用于展示：默认取新版（拆除类步骤回退旧版）；
+            # 删灯重建的拆除步骤由调用方显式传入旧版名称，避免张冠李戴
+            "fixture_name": name if name is not None else self.b_fx.get(fid, self.a_fx.get(fid)).name,
             "release": [
                 {"line_id": iv.line, "start": iv.start, "end": iv.end, "channels": iv.channels}
                 for iv in (release or [])
@@ -332,7 +381,16 @@ class _Planner:
 
     def _do_remove(self, fid: int) -> None:
         fx = self.cur.pop(fid)
-        self._emit("remove", fid, release=[fx.ival], occupy=None)
+        note = ""
+        name = None
+        if fid in self.recreated_ids:
+            # 被拆除的是旧版灯具：名称必须取自旧版快照（同 ID 的新灯是另一台）
+            name = fx.name
+            note = (
+                "该 ID 的旧灯具已删除；新版中同一 ID 是身份记录不同的另一台灯具"
+                "（见对应接入步骤），请勿按迁址处理"
+            )
+        self._emit("remove", fid, release=[fx.ival], occupy=None, note=note, name=name)
 
     def _do_move(self, fid: int, dest: Ival, *, temporary: bool, note: str = "") -> None:
         fx = self.cur[fid]
@@ -476,13 +534,20 @@ class _Planner:
         for fid in self.installed_ids:
             target = self.b_fx[fid]
             self._assert_safe(fid, target.ival)
+            note = ""
+            if fid in self.recreated_ids:
+                note = (
+                    "该 ID 复用了旧版已删除灯具的编号，但身份记录不同，"
+                    "实为另一台灯具（见对应拆除步骤），请勿按迁址处理"
+                )
             self._emit(
                 "install",
                 fid,
                 release=[],
                 occupy=target.ival,
+                note=note,
             )
-            self.cur[fid] = Fx(fid, target.name, target.line, target.start, target.end)
+            self.cur[fid] = Fx(fid, target.name, target.line, target.start, target.end, target.identity)
             self.remaining_installs.discard(fid)
 
         self._verify_final()
@@ -546,8 +611,9 @@ def build_changeover(payload_a: dict, payload_b: dict) -> dict:
     """根据两份发布快照 payload 生成从 A 到 B 的双版本换场施工单。
 
     前提不成立时抛 ChangeoverError（缺快照/未发布由调用方先行拦截，
-    保留区或线路启停两版不一致在此拒绝）；找不到安全周转位时返回的报告中
-    feasible=false 并附阻塞区间，不输出任何步骤。
+    保留区或线路启停两版不一致、同一 ID 身份无法核实在此拒绝）；
+    找不到安全周转位时返回的报告中 feasible=false 并附阻塞区间，
+    不输出任何步骤。
     """
     a_fx, a_res, a_active = _extract_snapshot(payload_a, "旧版（起点）")
     b_fx, b_res, b_active = _extract_snapshot(payload_b, "新版（目标）")
@@ -579,6 +645,19 @@ def build_changeover(payload_a: dict, payload_b: dict) -> dict:
 
     planner = _Planner(b_fx=b_fx, a_fx=a_fx, reservations=a_res, active=a_active,
                        plan_a_id=plan_a, plan_b_id=plan_b)
+
+    # 同一 ID 无法核实是否同一台灯（旧快照缺身份记录且落点有变化）：
+    # 拒绝自动生成施工单，逐项说明不确定原因，绝不靠名称猜测身份
+    if planner.uncertain:
+        raise ChangeoverError(
+            "identity_uncertain",
+            "以下灯具 ID 在两版快照中的落点不同，但至少一版快照缺少可核实的身份记录"
+            "（该快照发布于身份记录启用之前），无法排除“删除旧灯后以同一 ID 重建新灯”"
+            "的可能：若实为两台灯，按迁址/调通道施工会漏掉拆除与接入。"
+            "请现场核对这些 ID 是同一台灯具还是删旧接新，再人工安排施工；"
+            "或以身份记录启用之后发布的方案作为起点重新生成。",
+            [{"type": "identity_uncertain", "fixtures": planner.uncertain}],
+        )
 
     def _base_report() -> dict:
         return {

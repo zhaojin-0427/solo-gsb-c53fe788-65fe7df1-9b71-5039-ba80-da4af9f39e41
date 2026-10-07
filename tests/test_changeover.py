@@ -30,9 +30,20 @@ def client():
 # ---------------------------------------------------------------------------
 # 快照 payload 构造（引擎层只依赖 payload，不碰数据库）
 # ---------------------------------------------------------------------------
-def make_payload(plan_id, cv, allocs, reservations=None, active_lines=(1, 2, 3, 4)):
-    """allocs: [(fid, name, line, start, end)]；reservations: {line: [(start,end), ...]}。"""
+def make_payload(plan_id, cv, allocs, reservations=None, active_lines=(1, 2, 3, 4), identities=None):
+    """allocs: [(fid, name, line, start, end)]；reservations: {line: [(start,end), ...]}。
+
+    identities: {fid: str | None} 覆盖默认身份记录——默认每台灯为 "uid-{fid}"
+    （模拟身份记录启用后发布的快照）；显式传 None 表示该灯缺少身份记录
+    （模拟升级前发布的旧快照）。
+    """
     reservations = reservations or {}
+
+    def ident_of(fid):
+        if identities is not None and fid in identities:
+            return identities[fid]
+        return f"uid-{fid}"
+
     res_by_line = {l: [] for l in range(1, 5)}
     for line, items in reservations.items():
         for k, (s, e) in enumerate(items):
@@ -62,7 +73,7 @@ def make_payload(plan_id, cv, allocs, reservations=None, active_lines=(1, 2, 3, 
         "plan_id": plan_id, "config_version": cv, "status": "published",
         "optimality_status": "optimal", "from_snapshot": True,
         "allocations": [
-            {"fixture_id": f, "name": n, "line_id": l, "start": s, "end": e,
+            {"fixture_id": f, "name": n, "identity": ident_of(f), "line_id": l, "start": s, "end": e,
              "channels": e - s + 1, "migrated": False, "locked": False}
             for f, n, l, s, e in allocs
         ],

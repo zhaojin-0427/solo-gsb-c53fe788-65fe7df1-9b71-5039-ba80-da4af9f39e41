@@ -103,13 +103,16 @@ def _unproven_payload(db: Session, result: solver.SolveResult, version: int) -> 
     仍为 HTTP 200 并携带 unproven 状态与阶段信息，不当作已证无解。
     """
     has_candidate = result.feasible
-    names = {f.id: f.name for f in db.query(Fixture).all()}
-    locked_ids = {f.id for f in db.query(Fixture).filter(Fixture.locked.is_(True)).all()}
-    prev = {f.id: (f.previous_line, f.previous_start, f.locked) for f in db.query(Fixture).all()}
+    fixtures = db.query(Fixture).all()
+    names = {f.id: f.name for f in fixtures}
+    identities = {f.id: f.identity for f in fixtures}
+    locked_ids = {f.id for f in fixtures if f.locked}
+    prev = {f.id: (f.previous_line, f.previous_start, f.locked) for f in fixtures}
     alloc_out = [
         {
             "fixture_id": a.fixture_id,
             "name": names.get(a.fixture_id, f"#{a.fixture_id}"),
+            "identity": identities.get(a.fixture_id),
             "line_id": a.line_id,
             "start": a.start,
             "end": a.end,
@@ -157,11 +160,15 @@ def _plan_payload(db: Session, plan: Plan, *, feasible: bool = True) -> dict:
         .all()
     )
     names = {f.id: f.name for f in db.query(Fixture).all()}
+    identities = {f.id: f.identity for f in db.query(Fixture).all()}
     locked_ids = {f.id for f in db.query(Fixture).filter(Fixture.locked.is_(True)).all()}
     alloc_out = [
         {
             "fixture_id": a.fixture_id,
             "name": names.get(a.fixture_id, f"#{a.fixture_id}"),
+            # 可靠身份记录随快照持久化：换场据此核实同一 ID 是否同一台灯，
+            # 防止删除重建复用 ID 时把两台灯误对齐为一台
+            "identity": identities.get(a.fixture_id),
             "line_id": a.line_id,
             "start": a.start,
             "end": a.end,

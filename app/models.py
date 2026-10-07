@@ -61,8 +61,14 @@ class Fixture(Base):
 
     __tablename__ = "fixtures"
 
+    # ID 由 FixtureIdCounter 单调分配（见 services.allocate_fixture_id），
+    # 删除后永不复用——SQLite 裸整数主键会重发已删除的末位 ID，导致
+    # 换场施工单把“旧灯拆除 + 新灯接入”误判为同一台灯的迁址。
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    # 可靠身份记录：创建时生成的 UUID，改名/换模式均不变；发布快照携带它，
+    # 换场据此核实同一数字 ID 在两版中是否同一台灯（旧库迁移时补发）。
+    identity: Mapped[str | None] = mapped_column(String(36), nullable=True)
     mode_id: Mapped[int] = mapped_column(
         ForeignKey("fixture_modes.id", ondelete="RESTRICT"), nullable=False, index=True
     )
@@ -71,6 +77,20 @@ class Fixture(Base):
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     mode: Mapped[FixtureMode] = relationship()
+
+
+class FixtureIdCounter(Base):
+    """单行灯具 ID 分配计数器：ID 单调递增，删除的灯具 ID 永不复用。
+
+    初始化/每次启动时与历史数据对账（fixtures、plan_allocations、
+    published_snapshots 中出现过的最大 ID），只升不降，重启后仍有效——
+    已发布快照引用过的 ID 与升级后删除的灯具 ID 都不会再发给新灯。
+    """
+
+    __tablename__ = "fixture_id_counter"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False, default=1)
+    next_id: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
 class Line(Base):

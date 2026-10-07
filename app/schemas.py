@@ -75,6 +75,8 @@ class FixtureUpdate(BaseModel):
 class FixtureOut(BaseModel):
     id: int
     name: str
+    # 可靠身份记录（UUID）：创建时生成，改名/换模式不变；旧库迁移时补发
+    identity: str | None = None
     mode_id: int
     previous_line: int | None
     previous_start: int | None

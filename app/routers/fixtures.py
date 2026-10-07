@@ -1,6 +1,8 @@
 """灯具实例 CRUD。"""
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -8,7 +10,7 @@ from sqlalchemy.orm import Session
 from .. import schemas
 from ..database import get_db
 from ..models import Fixture, FixtureMode, FixtureType
-from ..services import bump_config_version
+from ..services import allocate_fixture_id, bump_config_version
 
 router = APIRouter(prefix="/api/fixtures", tags=["fixtures"])
 
@@ -19,6 +21,7 @@ def _out(db: Session, fx: Fixture) -> dict:
     return {
         "id": fx.id,
         "name": fx.name,
+        "identity": fx.identity,
         "mode_id": fx.mode_id,
         "previous_line": fx.previous_line,
         "previous_start": fx.previous_start,
@@ -48,7 +51,12 @@ def create_fixture(body: schemas.FixtureIn, db: Session = Depends(get_db)):
                 status_code=422,
                 detail=f"该模式占 {mode.channels} 通道，起始地址不能超过 {max_start}",
             )
+    # ID 由计数器单调分配：已删除灯具与已发布快照引用过的 ID 永不复用，
+    # 避免换场施工单把“拆除旧灯 + 接入新灯”误判为同一台灯的迁址；
+    # identity 为可靠身份记录，此后改名/换模式均不变。
     fx = Fixture(
+        id=allocate_fixture_id(db),
+        identity=str(uuid.uuid4()),
         name=body.name,
         mode_id=body.mode_id,
         previous_line=body.previous_line,
